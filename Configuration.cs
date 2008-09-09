@@ -101,5 +101,14 @@ namespace ReverseProxy
                 return (bool)this["useRegex"];
             }
         }
+
+        [ConfigurationProperty("includePost", DefaultValue = false, IsRequired = true)]
+        public bool IncludePost
+        {
+            get
+            {
+                return (bool)this["includePost"];
+            }
+        }
     }
 }
