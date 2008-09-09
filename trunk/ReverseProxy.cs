@@ -5,6 +5,7 @@ using System.Web;
 using System.Net;
 using System.IO;
 using System.Text.RegularExpressions;
+using System.Text;
 
 namespace ReverseProxy
 {
@@ -31,7 +32,7 @@ namespace ReverseProxy
         void IHttpHandler.ProcessRequest(HttpContext context)
         {
             MappingElement mapping = null;
-            Uri remoteUri;
+            Uri outgoingUri;
             HttpWebResponse response;
 
             //Check Configuration
@@ -56,15 +57,29 @@ namespace ReverseProxy
                 return;
             }
 
-            // Create destination mapping
-            remoteUri = CreateRemoteUri(context.Request.Url, mapping);
+            // Create destination mapping, this includes GET query as well
+            outgoingUri = CreateRemoteUri(mapping, GenerateTokensFromUri(context.Request.Url));
             
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(remoteUri);
+            HttpWebRequest outgoing = (HttpWebRequest)WebRequest.Create(outgoingUri);
+
+            // Credentials
             //request.Credentials = CredentialCache.DefaultCredentials;
+            
+            // Headers
+            outgoing.Method = context.Request.RequestType;
+            outgoing.ContentType = context.Request.ContentType;
+
+         
+            // Copy POST Data
+            if (mapping.IncludePost && (context.Request.RequestType == "POST"))
+            {
+                outgoing.ContentLength = context.Request.ContentLength;
+                CopyStream(context.Request.InputStream, outgoing.GetRequestStream());
+            }
 
             try
             {
-                response = (HttpWebResponse)request.GetResponse();
+                response = (HttpWebResponse)outgoing.GetResponse();
             }
             catch (WebException ex)
             {
@@ -96,20 +111,39 @@ namespace ReverseProxy
             context.Response.End();
         }
 
-        private Uri CreateRemoteUri(Uri uri, MappingElement mapping)
+        /// <summary>
+        /// Copy data from one stream, to the other.
+        /// </summary>
+        /// <param name="source"></param>
+        /// <param name="dest"></param>
+        private void CopyStream(Stream source, Stream dest)
         {
+            const int MAX_LEN = 512;
+            byte[] buffer = new byte[MAX_LEN];
+            int readBytes;
+            while ((readBytes = source.Read(buffer, 0, MAX_LEN)) > 0)
+            {
+                dest.Write(buffer, 0, buffer.Length);
+            }
+        }
+
+        private Uri CreateRemoteUri(MappingElement mapping, IDictionary<string, string> tokens)
+        {
+            Uri remoteUri;
             if (!mapping.UseRegex)
             {
-                return new Uri(mapping.TargetURI);
+                string uri = ReplaceTokens(mapping.TargetURI, tokens);
+                remoteUri = new Uri(uri);
             }
             else
             {
                 //TODO: impliment
+                remoteUri = null;
                 throw new NotImplementedException("RegEx RemoteURI not yet supported");
-                return null;
                 //Regex regex = new Regex(targetUri);
                 //return regex.IsMatch(sourceUri.AbsoluteUri);
             }
+            return remoteUri;
         }
 
         private bool MatchUri(Uri sourceUri, string targetUri, bool useRegex)
@@ -131,6 +165,49 @@ namespace ReverseProxy
             context.Response.StatusDescription = "Not Found";
             context.Response.Write("<h2>Not Found</h2>");
             context.Response.End();
+        }
+
+        private static string ReplaceTokens(string text, IDictionary<string, string> tokens)
+        {
+            Regex re = new Regex("#.*?#", RegexOptions.Compiled | RegexOptions.Singleline);
+            StringBuilder sb = new StringBuilder(text);
+            string replace;
+
+            foreach (Match m in re.Matches(text))  // assuming text is the text to search
+            {
+                // Replace any matching tokens
+                if (tokens.TryGetValue(m.Value, out replace))
+                    sb.Replace(m.Value, replace);
+            }
+            return sb.ToString();
+        }
+
+        private static IDictionary<string, string> GenerateTokensFromUri(Uri uri)
+        {
+            IDictionary<string, string> tokens = new Dictionary<string, string>();
+
+            tokens.Add("#host#", uri.Host);
+            tokens.Add("#port#", uri.Port.ToString());
+            //tokens.Add("#path#", uri.AbsolutePath);
+            tokens.Add("#path#", GetPathFromSegments(uri.Segments));
+            tokens.Add("#page#", GetPageFromSegments(uri.Segments));
+            tokens.Add("#query#", uri.Query);
+
+            return tokens;
+        }
+
+        private static string GetPathFromSegments(string[] segments)
+        {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < segments.Length - 1; i++)
+                sb.Append(segments[i]);
+
+            return sb.ToString();
+        }
+
+        private static string GetPageFromSegments(string[] segments)
+        {
+            return segments[segments.Length - 1];
         }
     }
 }
