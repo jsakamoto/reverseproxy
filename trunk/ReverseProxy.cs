@@ -28,7 +28,6 @@ namespace ReverseProxy
             get { return true; }
         }
         
-
         void IHttpHandler.ProcessRequest(HttpContext context)
         {
             MappingElement mapping = null;
@@ -43,7 +42,7 @@ namespace ReverseProxy
             // Search for a matching mapping
             foreach (MappingElement map in Configuration.Mappings)
             {
-                if (MatchUri(context.Request.Url, map.SourceURI, map.UseRegex))
+                if (MatchUri(context.Request.Url, map.SourceURI, map.SourceRegexMatching))
                 {
                     mapping = map;
                     break;
@@ -53,28 +52,27 @@ namespace ReverseProxy
             // Return 404 if can't find mapping
             if (mapping == null)
             {
-                Return404(context);
+                Utility.Return404(context);
                 return;
             }
 
             // Create destination mapping, this includes GET query as well
-            outgoingUri = CreateRemoteUri(mapping, GenerateTokensFromUri(context.Request.Url));
+            outgoingUri = CreateRemoteUri(mapping, GenerateTokensFromRequest(context.Request));
             
             HttpWebRequest outgoing = (HttpWebRequest)WebRequest.Create(outgoingUri);
 
             // Credentials
+            // TODO: Impliment Credential pass-through
             //request.Credentials = CredentialCache.DefaultCredentials;
             
             // Headers
-            outgoing.Method = context.Request.RequestType;
-            outgoing.ContentType = context.Request.ContentType;
-
+            Utility.CopyHeaders(context.Request, outgoing);
          
             // Copy POST Data
-            if (mapping.IncludePost && (context.Request.RequestType == "POST"))
+            if (mapping.SourceIncludePost && (context.Request.RequestType == "POST"))
             {
                 outgoing.ContentLength = context.Request.ContentLength;
-                CopyStream(context.Request.InputStream, outgoing.GetRequestStream());
+                Utility.CopyStream(context.Request.InputStream, outgoing.GetRequestStream());
             }
 
             try
@@ -83,66 +81,63 @@ namespace ReverseProxy
             }
             catch (WebException ex)
             {
-                Return404(context);
+                Utility.Return500(context, ex);
                 return;
             }
+            
             Stream receiveStream = response.GetResponseStream();
 
+            //Copy some headers, not too many since I'm not aginast hiding internal details ;)
+            //TODO: copy cookies?
+            context.Response.ContentType = response.ContentType;
+            //context.Response.ContentEncoding = response.ContentEncoding;
+
             // Do any parsing of HTML (or anything with URLs) here
-            if (mapping.RewriteContent
-                && ((response.ContentType.ToLower().IndexOf("html") >= 0) 
-                    || (response.ContentType.ToLower().IndexOf("javascript") >= 0))
+            if (!string.IsNullOrEmpty(mapping.RewriteContent)
+                && ((response.ContentType.ToLower().IndexOf("html") >= 0) || (response.ContentType.ToLower().IndexOf("javascript") >= 0))
                 )
             {
-                throw new NotImplementedException("Content Rewriting is not yet implimented");
+                string sResp = Utility.ConvertStream(receiveStream);
+                sResp = RewriteContent(sResp, mapping.RewriteContent);
+                context.Response.Write(sResp);
             }
             else
             {
-                // Output without formating
-                // NOTE: this would normaly be in the "else"
-                byte[] buff = new byte[1024];
-                int bytes = 0;
-                while ((bytes = receiveStream.Read(buff, 0, 1024)) > 0)
-                {
-                    context.Response.OutputStream.Write(buff, 0, bytes);
-                }
+                // Output without rewriting, this will offer the best performance and lowest memory useage.
+                Utility.CopyStream(receiveStream, context.Response.OutputStream);
             }
             response.Close();
             context.Response.End();
         }
 
-        /// <summary>
-        /// Copy data from one stream, to the other.
-        /// </summary>
-        /// <param name="source"></param>
-        /// <param name="dest"></param>
-        private void CopyStream(Stream source, Stream dest)
+        private string RewriteContent(string content, string rewriteGroup)
         {
-            const int MAX_LEN = 512;
-            byte[] buffer = new byte[MAX_LEN];
-            int readBytes;
-            while ((readBytes = source.Read(buffer, 0, MAX_LEN)) > 0)
+            //First get rewrite group
+            RewriteGroup rewriteGrp = Configuration.RewriteGroups.Get(rewriteGroup);
+
+            if (rewriteGrp == null)
+                throw new ArgumentOutOfRangeException("rewriteGroup", rewriteGroup, "Unknown Rewrite Group");
+
+            foreach (Rewrite rw in rewriteGrp)
             {
-                dest.Write(buffer, 0, buffer.Length);
+                if (rw.EnableRegEx)
+                {
+                    //TODO: Regex rewriting has not been implimented
+                    throw new NotImplementedException("Regex rewriting has not been implimented.");
+                }
+                else
+                {
+                    content = content.Replace(rw.Match, rw.Replace);
+                }
             }
+            return content;
         }
 
         private Uri CreateRemoteUri(MappingElement mapping, IDictionary<string, string> tokens)
         {
             Uri remoteUri;
-            if (!mapping.UseRegex)
-            {
-                string uri = ReplaceTokens(mapping.TargetURI, tokens);
-                remoteUri = new Uri(uri);
-            }
-            else
-            {
-                //TODO: impliment
-                remoteUri = null;
-                throw new NotImplementedException("RegEx RemoteURI not yet supported");
-                //Regex regex = new Regex(targetUri);
-                //return regex.IsMatch(sourceUri.AbsoluteUri);
-            }
+            string uri = ReplaceTokens(mapping.TargetURI, tokens);
+            remoteUri = new Uri(uri);
             return remoteUri;
         }
 
@@ -155,16 +150,8 @@ namespace ReverseProxy
             else
             {
                 Regex regex = new Regex(targetUri);
-                return regex.IsMatch(sourceUri.AbsoluteUri);
+                return regex.IsMatch(sourceUri.AbsolutePath);
             }
-        }
-
-        private static void Return404(HttpContext context)
-        {
-            context.Response.StatusCode = 404;
-            context.Response.StatusDescription = "Not Found";
-            context.Response.Write("<h2>Not Found</h2>");
-            context.Response.End();
         }
 
         private static string ReplaceTokens(string text, IDictionary<string, string> tokens)
@@ -182,32 +169,36 @@ namespace ReverseProxy
             return sb.ToString();
         }
 
-        private static IDictionary<string, string> GenerateTokensFromUri(Uri uri)
+        private static IDictionary<string, string> GenerateTokensFromRequest(HttpRequest request)
         {
             IDictionary<string, string> tokens = new Dictionary<string, string>();
+            string path;
+            string page;
 
-            tokens.Add("#host#", uri.Host);
-            tokens.Add("#port#", uri.Port.ToString());
-            //tokens.Add("#path#", uri.AbsolutePath);
-            tokens.Add("#path#", GetPathFromSegments(uri.Segments));
-            tokens.Add("#page#", GetPageFromSegments(uri.Segments));
-            tokens.Add("#query#", uri.Query);
+            GetDetailsFromPath(request.FilePath, out path, out page);
+
+            tokens.Add("#host#", request.Url.Host);
+            tokens.Add("#port#", request.Url.Port.ToString());
+            tokens.Add("#path#", path);
+            tokens.Add("#page#", page);
+            tokens.Add("#query#", request.PathInfo + request.Url.Query);
 
             return tokens;
         }
 
-        private static string GetPathFromSegments(string[] segments)
+        private static void GetDetailsFromPath(string fullPath, out string path, out string page)
         {
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < segments.Length - 1; i++)
-                sb.Append(segments[i]);
-
-            return sb.ToString();
-        }
-
-        private static string GetPageFromSegments(string[] segments)
-        {
-            return segments[segments.Length - 1];
+            int lastPos = fullPath.LastIndexOf('/') +1;
+            if (lastPos > 0)
+            {
+                path = fullPath.Substring(0, lastPos);
+                page = fullPath.Substring(lastPos);
+            }
+            else
+            {
+                path = string.Empty;
+                page = fullPath;
+            }
         }
     }
 }
