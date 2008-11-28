@@ -39,6 +39,13 @@ namespace ReverseProxy
                         //Ignore, will be populated as needed by the outgoing request
                         break;
 
+                    case "Expect":
+                        /* Not sure how to impliment this one. Just filtering it out for now.
+                         * if (value == "100-Continue")
+                            System.Net.ServicePointManager.Expect100Continue=true;
+                         * */
+                        break;
+
                     case "Content-Type":
                         to.ContentType = value;
                         break;
