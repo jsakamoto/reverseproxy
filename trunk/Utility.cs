@@ -62,6 +62,10 @@ namespace ReverseProxy
                         to.UserAgent = value;
                         break;
 
+                    case "Accept-Encoding":
+                        /*  Filter out, because I'm not sure how to impliment that correctly  */
+                        break;
+
                     default:
                         to.Headers.Add(key, value);
                         break;

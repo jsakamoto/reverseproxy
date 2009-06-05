@@ -87,10 +87,13 @@ namespace ReverseProxy
             
             Stream receiveStream = response.GetResponseStream();
 
-            //Copy some headers, not too many since I'm not aginast hiding internal details ;)
+            //Copy some headers, not too many since I'm not against hiding internal details ;)
             //TODO: copy cookies?
             context.Response.ContentType = response.ContentType;
-            //context.Response.ContentEncoding = response.ContentEncoding;
+
+            // Copy Content Encoding
+            //context.Response.ContentEncoding = Encoding.
+            //context.Response.
 
             // Do any parsing of HTML (or anything with URLs) here
             if (!string.IsNullOrEmpty(mapping.RewriteContent)
